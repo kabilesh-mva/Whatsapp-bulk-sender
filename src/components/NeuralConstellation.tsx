@@ -43,7 +43,6 @@ function Counter({ target, duration = 2, suffix = '' }: { target: number; durati
   const [count, setCount] = useState(0)
   
   useEffect(() => {
-    let start = 0
     const startTime = Date.now()
     const animate = () => {
       const elapsed = (Date.now() - startTime) / 1000
@@ -86,7 +85,7 @@ function AnimatedText({ text, className, delay = 0 }: { text: string; className?
 export default function NeuralConstellation() {
   const [hoveredNode, setHoveredNode] = useState<string | null>(null)
   const [rotatingIndex, setRotatingIndex] = useState(0)
-  const [isLoaded, setIsLoaded] = useState(false)
+  const [, setIsLoaded] = useState(false)
   const containerRef = useRef<HTMLDivElement>(null)
   
   // Mouse tracking for parallax

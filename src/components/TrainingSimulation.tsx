@@ -17,7 +17,7 @@ export default function TrainingSimulation() {
     learningRate: 0.001
   })
   const [currentLayer, setCurrentLayer] = useState(0)
-  const [revealedSections, setRevealedSections] = useState<string[]>([])
+  const [, setRevealedSections] = useState<string[]>([])
   const [showIntro, setShowIntro] = useState(true)
   const canvasRef = useRef<HTMLCanvasElement>(null)
 
@@ -50,7 +50,7 @@ export default function TrainingSimulation() {
     const connections: { from: number; to: number; active: boolean }[] = []
 
     // Create network nodes
-    layers.forEach((layer, layerIndex) => {
+    layers.forEach((_layer, layerIndex) => {
       const nodeCount = layerIndex === 0 || layerIndex === layers.length - 1 ? 3 : 5
       const x = (layerIndex + 1) / (layers.length + 1)
       

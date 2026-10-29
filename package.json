@@ -14,11 +14,14 @@
     "format": "prettier --write \"src/**/*.{ts,tsx,css}\" \"tests/**/*.ts\" \"*.{json,md,yml,yaml}\""
   },
   "dependencies": {
+    "@tailwindcss/vite": "^4.3.3",
+    "framer-motion": "^14.7.1",
+    "idb": "^8.0.0",
+    "libphonenumber-js": "^1.11.9",
+    "papaparse": "^5.4.1",
     "react": "^18.3.1",
     "react-dom": "^18.3.1",
-    "idb": "^8.0.0",
-    "papaparse": "^5.4.1",
-    "libphonenumber-js": "^1.11.9",
+    "tailwindcss": "^4.3.3",
     "xlsx": "^0.18.5"
   },
   "devDependencies": {
@@ -33,10 +36,10 @@
     "eslint-plugin-react-hooks": "^4.6.2",
     "eslint-plugin-react-refresh": "^0.4.9",
     "globals": "^15.9.0",
+    "jsdom": "^24.1.1",
     "prettier": "^3.3.3",
     "typescript": "^5.5.4",
     "vite": "^5.4.2",
-    "vitest": "^2.0.5",
-    "jsdom": "^24.1.1"
+    "vitest": "^2.0.5"
   }
 }

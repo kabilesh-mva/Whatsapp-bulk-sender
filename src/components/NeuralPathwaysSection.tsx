@@ -75,7 +75,6 @@ function AnimatedCounter({ value, isActive, delay = 0 }: { value: number; isActi
     }
     
     const timeout = setTimeout(() => {
-      let start = 0
       const duration = 1000
       const startTime = Date.now()
       

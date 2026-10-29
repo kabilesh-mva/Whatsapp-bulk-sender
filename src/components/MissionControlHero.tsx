@@ -1,5 +1,5 @@
-import { useState, useEffect, useRef } from 'react'
-import { motion, AnimatePresence } from 'framer-motion'
+import { useState, useEffect } from 'react'
+import { motion } from 'framer-motion'
 
 const rotatingStats = [
   { label: 'MODELS DEPLOYED', value: '15+', icon: '◆' },
