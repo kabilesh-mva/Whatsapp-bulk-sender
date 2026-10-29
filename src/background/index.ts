@@ -433,10 +433,15 @@ chrome.alarms.onAlarm?.addListener(() => {
 
 chrome.action?.onClicked?.addListener(async () => {
   const tabs = await chrome.tabs.query({ url: 'https://web.whatsapp.com/*' });
-  if (tabs[0]?.id) {
+  if (tabs[0]?.id != null) {
     await chrome.tabs.update(tabs[0].id, { active: true });
-    await chrome.windows.update?.(tabs[0].windowId ?? chrome.windows.WINDOW_ID_CURRENT, { focused: true });
-    chrome.runtime.sendMessage({ type: 'event', name: 'session:updated', snapshot: runtime.session }).catch(() => undefined);
+    if (tabs[0].windowId != null) {
+      await chrome.windows.update?.(tabs[0].windowId, { focused: true });
+    }
+    // Ask the content script to open the panel.
+    void chrome.tabs.sendMessage(tabs[0].id, { type: 'relay:toggle-panel' }).catch(() => undefined);
+  } else {
+    await chrome.tabs.create({ url: 'https://web.whatsapp.com/' });
   }
 });
 
