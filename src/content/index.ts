@@ -94,12 +94,13 @@ function mountPanel(): HTMLIFrameElement {
   frame.id = PANEL_HOST_ID;
   frame.setAttribute('title', 'Relay Campaigns panel');
   // Extension page inside an isolated frame: styles and scripts are fully ours.
-  frame.src = chrome.runtime.getURL('panel/index.html');
+  frame.src = chrome.runtime.getURL('src/panel/index.html');
   Object.assign(frame.style, {
     position: 'fixed',
     top: '0',
     right: `-${panelWidth()}px`,
     bottom: '0',
+    height: '100vh',
     width: `${panelWidth()}px`,
     border: 'none',
     borderLeft: '1px solid rgba(0,0,0,.2)',
@@ -116,6 +117,7 @@ function setPanelPosition(open: boolean): void {
   const frame = document.getElementById(PANEL_HOST_ID) as HTMLIFrameElement | null;
   if (!frame) return;
   frame.style.width = `${panelWidth()}px`;
+  frame.style.height = '100vh';
   frame.style.right = open ? '0' : `-${panelWidth()}px`;
   moveToggle(open);
 }
@@ -135,6 +137,14 @@ function start(): void {
   chrome.runtime.onMessage.addListener((msg: unknown) => {
     const m = msg as { type?: string };
     if (m?.type === 'relay:toggle-panel') togglePanel();
+  });
+  // Messages from the panel iframe (e.g. close button).
+  window.addEventListener('message', (e) => {
+    if (e.data?.type === 'relay:close-panel') {
+      if (panelOpen) togglePanel();
+    } else if (e.data?.type === 'relay:toggle-panel') {
+      togglePanel();
+    }
   });
   // Light polling only for shell presence — no message data is ever read.
   setInterval(() => {

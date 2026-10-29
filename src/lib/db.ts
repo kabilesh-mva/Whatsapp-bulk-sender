@@ -102,14 +102,14 @@ export async function listCampaigns(): Promise<Campaign[]> {
 export async function deleteCampaign(id: string): Promise<void> {
   const db = await getDb();
   const txResults = db.transaction('results', 'readwrite');
-  let cursor = await txResults.index('byCampaign').openCursor(IDBKeyRange.only(id));
+  let cursor = await txResults.store.index('byCampaign').openCursor(IDBKeyRange.only(id));
   while (cursor) {
     await cursor.delete();
     cursor = await cursor.continue();
   }
   await txResults.done;
   const txEvents = db.transaction('events', 'readwrite');
-  let ec = await txEvents.index('byCampaign').openCursor(IDBKeyRange.only(id));
+  let ec = await txEvents.store.index('byCampaign').openCursor(IDBKeyRange.only(id));
   while (ec) {
     await ec.delete();
     ec = await ec.continue();

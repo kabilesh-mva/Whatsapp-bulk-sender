@@ -11,7 +11,7 @@
     "type": "module"
   },
   "action": {
-    "default_popup": "popup/index.html",
+    "default_popup": "src/popup/index.html",
     "default_title": "__MSG_actionTitle__",
     "default_icon": {
       "16": "icons/icon-16.png",
@@ -35,7 +35,7 @@
   ],
   "web_accessible_resources": [
     {
-      "resources": ["panel/index.html", "assets/*", "icons/*"],
+      "resources": ["src/panel/index.html", "panel/*", "assets/*", "icons/*"],
       "matches": ["https://web.whatsapp.com/*"]
     }
   ]

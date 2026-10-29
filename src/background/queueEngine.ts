@@ -7,9 +7,9 @@ import type {
   QueueSummary,
   RecipientResult,
   SuppressionEntry,
-} from '../../types/domain';
-import { renderTemplate, contactVariableMap } from '../../lib/templateVars';
-import { buildSuppressionIndex, isSuppressed } from '../../lib/suppression';
+} from '../types/domain';
+import { renderTemplate, contactVariableMap } from '../lib/templateVars';
+import { buildSuppressionIndex, isSuppressed } from '../lib/suppression';
 
 /**
  * Pure queue engine: decides what happens next for a campaign run.
@@ -69,7 +69,7 @@ export async function processNextRecipient(
 ): Promise<StepOutcome> {
   const results = await deps.getResults(campaign.id);
   const done = new Set(results.map((r) => r.contactId));
-  const nextId = campaign.contactIds.find((id) => !done.has(id));
+  const nextId = campaign.contactIds.find((id: string) => !done.has(id));
 
   if (!nextId) {
     const summary = computeSummary(campaign, results);
