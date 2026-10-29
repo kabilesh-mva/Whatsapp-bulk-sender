@@ -135,25 +135,27 @@ function panelWidth(): number {
 function mountPanel(): HTMLIFrameElement {
   const existing = document.getElementById(PANEL_HOST_ID) as HTMLIFrameElement | null;
   if (existing) return existing;
+
   const frame = document.createElement('iframe');
   frame.id = PANEL_HOST_ID;
   frame.setAttribute('title', 'Relay Campaigns panel');
-  // Extension page inside an isolated frame: styles and scripts are fully ours.
   frame.src = chrome.runtime.getURL('panel/index.html');
+
   Object.assign(frame.style, {
     position: 'fixed',
     top: '0',
     right: `-${panelWidth()}px`,
-    bottom: '0',
     width: `${panelWidth()}px`,
+    height: '100vh',
     border: 'none',
     borderLeft: '1px solid rgba(0,0,0,.2)',
-    zIndex: '999999',
+    zIndex: '2147483647',
     background: '#f6f7fb',
     boxShadow: '0 8px 30px rgba(15,23,42,.28)',
     transition: 'right .18s ease-out',
   } as CSSStyleDeclaration);
-  document.body.appendChild(frame);
+
+  document.body.appendChild(frame); // <--- ADD THIS LINE BACK!
   return frame;
 }
 
@@ -161,6 +163,7 @@ function setPanelPosition(open: boolean): void {
   const frame = document.getElementById(PANEL_HOST_ID) as HTMLIFrameElement | null;
   if (!frame) return;
   frame.style.width = `${panelWidth()}px`;
+  frame.style.height = '100vh';
   frame.style.right = open ? '0' : `-${panelWidth()}px`;
   moveToggle(open);
 }
