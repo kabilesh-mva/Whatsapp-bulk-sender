@@ -57,22 +57,27 @@ npm run format   # Prettier
 ### Production build
 
 ```bash
-npm run build    # tsc --noEmit && vite build  →  produces dist/ with manifest.json
+npm run build    # tsc --noEmit && vite build && verify dist/  →  loadable unpacked extension
 ```
 
 The build emits a complete unpacked extension in **`dist/`**:
 
 ```
 dist/manifest.json        ← copied from public/manifest.json by Vite
-dist/background.js        ← service worker
-dist/content.js           ← content script loader
-dist/panel/               ← injected panel (index.html + inject.js)
-dist/popup/               ← toolbar popup
+dist/background.js        ← service worker (fixed name, never hashed)
+dist/content.js           ← content script loader (fixed name, never hashed)
+dist/panel/index.html     ← injected panel UI (web-accessible iframe page)
+dist/popup/index.html     ← toolbar popup
 dist/icons/  dist/_locales/  dist/assets/
 ```
 
-If `dist/manifest.json` is missing, you built from an outdated checkout — pull the latest
-branch, then `rm -rf dist && npm run build`.
+`npm run build` ends with `node scripts/verify_dist.mjs`, which fails the build if any
+file referenced by `manifest.json` (service worker, content script, popup, icons,
+`_locales`) is missing from `dist/`. Run it alone anytime with `npm run verify:dist`.
+
+If `dist/manifest.json` or `dist/content.js` is missing, your `dist/` is stale — delete
+it and rebuild (`rm -rf dist && npm run build`). When loading an unpacked extension,
+always pick the **`dist` folder itself**, never the project root.
 
 ### Load unpacked in Brave
 
