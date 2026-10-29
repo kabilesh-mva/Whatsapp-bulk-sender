@@ -1,3 +1,4 @@
+console.log('🚀 RELAY CAMPAIGNS CONTENT SCRIPT LOADED SUCCESSFULLY!');
 import { sendViaWhatsAppWeb } from './whatsappRuntime';
 
 /**
@@ -39,7 +40,11 @@ function reportSession(): void {
 interface OutboundSendRequest {
   type: 'relay:send';
   ackId: string;
-  message: { toNormalizedPhone: string; text: string; attachment?: { fileName: string; mimeType: string; sizeBytes: number } };
+  message: {
+    toNormalizedPhone: string;
+    text: string;
+    attachment?: { fileName: string; mimeType: string; sizeBytes: number };
+  };
 }
 
 /** Execute one transport attempt requested by the service worker and ack it back. */
@@ -52,10 +57,20 @@ async function handleOutboundSend(req: OutboundSendRequest): Promise<void> {
       attachment: req.message.attachment,
     });
   } catch (e) {
-    result = { ok: false, errorCode: 'PAGE_EXCEPTION', errorMessage: e instanceof Error ? e.message : String(e) };
+    result = {
+      ok: false,
+      errorCode: 'PAGE_EXCEPTION',
+      errorMessage: e instanceof Error ? e.message : String(e),
+    };
   }
   try {
-    port?.postMessage({ type: 'send:ack', ackId: req.ackId, ok: result.ok, errorCode: result.errorCode, errorMessage: result.errorMessage });
+    port?.postMessage({
+      type: 'send:ack',
+      ackId: req.ackId,
+      ok: result.ok,
+      errorCode: result.errorCode,
+      errorMessage: result.errorMessage,
+    });
   } catch {
     /* port closed mid-send — SW will time out the ack and mark the attempt failed */
   }
