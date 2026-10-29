@@ -1,0 +1,443 @@
+import type {
+  AppSettings,
+  BridgeEvent,
+  BridgeRequest,
+  BridgeResponse,
+  Campaign,
+  QueueSummary,
+  SessionSnapshot,
+} from '../types/domain';
+import {
+  getCampaign,
+  getContactsByIds,
+  getResultsForCampaign,
+  loadSettings,
+  putCampaign,
+  saveSettings,
+  deleteAllLocalData,
+  exportAllLocalData,
+  listCampaigns,
+  putResult,
+  addEvent,
+  getEventsForCampaign,
+  loadSuppression,
+  saveSuppression,
+  listTemplates,
+  putTemplate,
+  deleteTemplate,
+  getAllContacts,
+} from '../lib/db';
+import { MockMessagingAdapter } from '../lib/adapters/mockAdapter';
+import { computeSummary, pickDelay, processNextRecipient, type QueueDeps } from './queueEngine';
+import { assertTransition, canApplyIntent, validateStart, type QueueIntent } from './stateMachine';
+
+/**
+ * Service worker: owns campaign state, runs the queue loop, and answers bridge
+ * requests from the panel/popup. In this build the transport is always the mock
+ * adapter; a real one plugs in behind the MessagingAdapter boundary only.
+ */
+
+const adapter = new MockMessagingAdapter({ latencyMs: [50, 150] });
+
+interface RuntimeState {
+  runningCampaignId: string | null;
+  cancelRequested: boolean;
+  pauseRequested: boolean;
+  session: SessionSnapshot;
+}
+
+const runtime: RuntimeState = {
+  runningCampaignId: null,
+  cancelRequested: false,
+  pauseRequested: false,
+  session: { whatsappTabConnected: false, loggedIn: null, lastCheckedAt: null },
+};
+
+/* ---------------- event fan-out ---------------- */
+
+function broadcast(evt: BridgeEvent): void {
+  chrome.runtime.sendMessage(evt).catch(() => {
+    /* no listeners — fine */
+  });
+}
+
+async function emitSummary(campaign: Campaign): Promise<QueueSummary> {
+  const results = await getResultsForCampaign(campaign.id);
+  const summary = computeSummary(campaign, results);
+  broadcast({ type: 'event', name: 'queue:updated', campaignId: campaign.id, state: campaign.state, summary });
+  return summary;
+}
+
+/* ---------------- queue loop ---------------- */
+
+let wakeAlarmSeen = 0;
+
+async function buildDeps(settings: AppSettings): Promise<QueueDeps> {
+  return {
+    adapter,
+    getContacts: getContactsByIds,
+    getResults: getResultsForCampaign,
+    saveResult: putResult,
+    logEvent: async (e) => {
+      await addEvent({ ...e, id: crypto.randomUUID(), timestamp: e.timestamp ?? Date.now() });
+    },
+    saveCampaign: putCampaign,
+    loadSuppression,
+    defaultCountry: settings.defaultCountryCode as AppSettings['defaultCountryCode'],
+    random: Math.random,
+    now: Date.now,
+    isSessionAlive: async () => {
+      // Demo mode: the "session" is considered alive while the WhatsApp tab port exists
+      // OR when nothing has ever connected (pure browser-tab dev usage).
+      if (runtime.session.whatsappTabConnected) return true;
+      return runtime.session.lastCheckedAt === null;
+    },
+  };
+}
+
+async function runQueueLoop(campaignId: string): Promise<void> {
+  if (runtime.runningCampaignId && runtime.runningCampaignId !== campaignId) return;
+  runtime.runningCampaignId = campaignId;
+  runtime.cancelRequested = false;
+  runtime.pauseRequested = false;
+
+  try {
+    for (;;) {
+      const campaign = await getCampaign(campaignId);
+      if (!campaign) break;
+      if (runtime.cancelRequested) {
+        await transition(campaign, 'stopped');
+        break;
+      }
+      if (runtime.pauseRequested) {
+        await transition(campaign, 'paused');
+        break;
+      }
+      if (campaign.state !== 'running') break;
+
+      const settings = await loadSettings();
+      const deps = await buildDeps(settings);
+      const contacts = await getContactsByIds(campaign.contactIds);
+      const outcome = await processNextRecipient(campaign, contacts, deps);
+
+      if (outcome.kind === 'session_lost') {
+        // Never silently continue: park as paused and tell the operator why.
+        const c2 = await getCampaign(campaignId);
+        if (c2 && c2.state === 'running') await transition(c2, 'paused');
+        break;
+      }
+      if (outcome.kind === 'completed') {
+        const c2 = await getCampaign(campaignId);
+        if (c2) {
+          c2.completedAt = Date.now();
+          await transition(c2, 'completed');
+        }
+        break;
+      }
+
+      const delay = Math.round(pickDelay(campaign, Math.random));
+      await interruptibleSleep(delay, campaignId);
+    }
+  } finally {
+    if (runtime.runningCampaignId === campaignId) runtime.runningCampaignId = null;
+  }
+}
+
+function interruptibleSleep(ms: number, campaignId: string): Promise<void> {
+  return new Promise((resolve) => {
+    const start = Date.now();
+    let remaining = ms;
+    const tick = () => {
+      if (runtime.cancelRequested || runtime.pauseRequested || runtime.runningCampaignId !== campaignId) {
+        resolve();
+        return;
+      }
+      remaining = ms - (Date.now() - start);
+      if (remaining <= 0) {
+        resolve();
+        return;
+      }
+      setTimeout(tick, Math.min(remaining, 1000));
+    };
+    setTimeout(tick, Math.min(remaining, 1000));
+  });
+}
+
+async function transition(campaign: Campaign, to: Campaign['state']): Promise<void> {
+  assertTransition(campaign.state, to);
+  const updated: Campaign = { ...campaign, state: to };
+  if (to === 'running' && !updated.startedAt) updated.startedAt = Date.now();
+  if (to === 'completed') updated.completedAt = updated.completedAt ?? Date.now();
+  await putCampaign(updated);
+  await addEvent({
+    id: crypto.randomUUID(),
+    campaignId: campaign.id,
+    contactId: '*',
+    type: 'state_changed',
+    timestamp: Date.now(),
+    detail: `${campaign.state} -> ${to}`,
+  });
+  await emitSummary(updated);
+}
+
+/* ---------------- intent handlers ---------------- */
+
+async function handleIntent(id: string, intent: QueueIntent): Promise<unknown> {
+  const campaign = await getCampaign(id);
+  if (!campaign) throw new Error('Campaign not found');
+  if (!canApplyIntent(campaign.state, intent)) {
+    throw new Error(`Cannot ${intent} a campaign in state "${campaign.state}".`);
+  }
+
+  switch (intent) {
+    case 'markReady': {
+      const settings = await loadSettings();
+      const errors = validateStart({
+        consentConfirmed: campaign.settings.consentConfirmed,
+        requireFinalConfirmation: campaign.settings.requireFinalConfirmation,
+        finalConfirmationGiven: true,
+        recipientCount: campaign.contactIds.length,
+        maxRecipients: Math.min(settings.queueDefaults.maxRecipients, campaign.settings.maxRecipients),
+        adapterAvailable: await adapter.isAvailable(),
+      });
+      if (errors.length) throw new Error(errors.join(' '));
+      await transition(campaign, 'ready');
+      return { ok: true };
+    }
+    case 'start': {
+      const settings = await loadSettings();
+      const errors = validateStart({
+        consentConfirmed: campaign.settings.consentConfirmed,
+        requireFinalConfirmation: campaign.settings.requireFinalConfirmation,
+        finalConfirmationGiven: true,
+        recipientCount: campaign.contactIds.length,
+        maxRecipients: Math.min(settings.queueDefaults.maxRecipients, campaign.settings.maxRecipients),
+        adapterAvailable: await adapter.isAvailable(),
+      });
+      if (errors.length) throw new Error(errors.join(' '));
+      await transition(campaign, 'running');
+      void runQueueLoop(campaign.id);
+      return { ok: true };
+    }
+    case 'pause': {
+      runtime.pauseRequested = true;
+      // If the loop isn't active (e.g., re-attach after SW restart), transition directly.
+      if (!runtime.runningCampaignId) await transition(campaign, 'paused');
+      return { ok: true };
+    }
+    case 'resume': {
+      const c = await getCampaign(id);
+      if (!c) throw new Error('Campaign not found');
+      await transition(c, 'running');
+      void runQueueLoop(c.id);
+      return { ok: true };
+    }
+    case 'stop': {
+      runtime.cancelRequested = true;
+      if (!runtime.runningCampaignId) await transition(campaign, 'stopped');
+      return { ok: true };
+    }
+    case 'retryFailed': {
+      const results = await getResultsForCampaign(id);
+      const failed = results.filter((r) => r.status === 'failed');
+      if (failed.length === 0) return { ok: true, retried: 0 };
+      // Clear failed rows so the engine re-queues those contacts.
+      for (const f of failed) {
+        await putResult({ ...f, status: 'queued', errorCode: undefined, errorMessage: undefined, timestamp: Date.now() });
+      }
+      // Remove queued placeholder by deleting instead: simpler to delete then let engine redo.
+      const c = await getCampaign(id);
+      if (!c) throw new Error('Campaign not found');
+      if (c.state !== 'running') {
+        await transition(c, 'running');
+      }
+      void runQueueLoop(c.id);
+      return { ok: true, retried: failed.length };
+    }
+    case 'backToDraft': {
+      await transition(campaign, 'draft');
+      return { ok: true };
+    }
+  }
+}
+
+/* ---------------- request router ---------------- */
+
+async function handle(req: BridgeRequest): Promise<unknown> {
+  switch (req.type) {
+    case 'campaign/list':
+      return listCampaigns();
+    case 'campaign/get':
+      return getCampaign(req.id);
+    case 'campaign/saveDraft': {
+      const { campaign, contacts } = req;
+      const existing = await getCampaign(campaign.id);
+      const next: Campaign = { ...campaign, createdAt: existing?.createdAt ?? campaign.createdAt };
+      if (existing && existing.state !== campaign.state) assertTransition(existing.state, campaign.state);
+      const { putContacts } = await import('../lib/db');
+      await putContacts(contacts);
+      await putCampaign(next);
+      return next;
+    }
+    case 'campaign/markReady':
+      return handleIntent(req.id, 'markReady');
+    case 'campaign/start':
+      return handleIntent(req.id, 'start');
+    case 'campaign/pause':
+      return handleIntent(req.id, 'pause');
+    case 'campaign/resume':
+      return handleIntent(req.id, 'resume');
+    case 'campaign/stop':
+      return handleIntent(req.id, 'stop');
+    case 'campaign/retryFailed':
+      return handleIntent(req.id, 'retryFailed');
+    case 'campaign/delete':
+      return (async () => {
+        const { deleteCampaign } = await import('../lib/db');
+        await deleteCampaign(req.id);
+        return { ok: true };
+      })();
+    case 'campaign/summary': {
+      const c = await getCampaign(req.id);
+      if (!c) throw new Error('Campaign not found');
+      return emitSummary(c);
+    }
+    case 'campaign/results':
+      return getResultsForCampaign(req.id);
+    case 'campaign/events':
+      return getEventsForCampaign(req.id);
+    case 'contacts/list':
+      return req.ids ? getContactsByIds(req.ids) : getAllContacts();
+    case 'template/list':
+      return listTemplates();
+    case 'template/save':
+      return (async () => {
+        await putTemplate(req.template);
+        return req.template;
+      })();
+    case 'template/delete':
+      return (async () => {
+        await deleteTemplate(req.id);
+        return { ok: true };
+      })();
+    case 'suppression/list':
+      return loadSuppression();
+    case 'suppression/add':
+      return (async () => {
+        const all = await loadSuppression();
+        all.push(req.entry);
+        await saveSuppression(all);
+        return all;
+      })();
+    case 'suppression/addMany':
+      return (async () => {
+        const all = await loadSuppression();
+        const seen = new Set(all.map((e) => e.normalizedPhone ?? e.phone));
+        for (const e of req.entries) {
+          const key = e.normalizedPhone ?? e.phone;
+          if (!seen.has(key)) {
+            all.push(e);
+            seen.add(key);
+          }
+        }
+        await saveSuppression(all);
+        return all;
+      })();
+    case 'suppression/remove':
+      return (async () => {
+        const all = (await loadSuppression()).filter((e) => e.id !== req.id);
+        await saveSuppression(all);
+        return all;
+      })();
+    case 'settings/get':
+      return loadSettings();
+    case 'settings/save':
+      return (async () => {
+        await saveSettings(req.settings);
+        return req.settings;
+      })());
+    case 'session/snapshot':
+      return { ...runtime.session, lastCheckedAt: Date.now() };
+    case 'data/deleteAll':
+      return (async () => {
+        runtime.cancelRequested = true;
+        await deleteAllLocalData();
+        return { ok: true };
+      })();
+    case 'data/export':
+      return exportAllLocalData();
+    default: {
+      const _exhaustive: never = req;
+      return _exhaustive;
+    }
+  }
+}
+
+/* ---------------- wiring ---------------- */
+
+chrome.runtime.onMessage.addListener(
+  (msg: BridgeRequest | { type: 'content:hello' } | { type: 'session:update'; snapshot: Partial<SessionSnapshot> }, _sender, sendResponse: (r: BridgeResponse) => void) => {
+    if (msg.type === 'content:hello') {
+      runtime.session.whatsappTabConnected = true;
+      runtime.session.lastCheckedAt = Date.now();
+      broadcast({ type: 'event', name: 'session:updated', snapshot: runtime.session });
+      sendResponse({ type: 'response', ok: true, payload: { ok: true } });
+      return false;
+    }
+    if (msg.type === 'session:update') {
+      runtime.session = { ...runtime.session, ...msg.snapshot, lastCheckedAt: Date.now() };
+      broadcast({ type: 'event', name: 'session:updated', snapshot: runtime.session });
+      sendResponse({ type: 'response', ok: true, payload: runtime.session });
+      return false;
+    }
+    const req = msg as BridgeRequest;
+    handle(req)
+      .then((payload) => sendResponse({ type: 'response', ok: true, payload }))
+      .catch((err: unknown) =>
+        sendResponse({ type: 'response', ok: false, error: err instanceof Error ? err.message : String(err) }),
+      );
+    return true; // keep the message channel open for the async response
+  },
+);
+
+chrome.runtime.onConnect?.addListener((port) => {
+  if (port.name === 'whatsapp-session') {
+    runtime.session.whatsappTabConnected = true;
+    runtime.session.lastCheckedAt = Date.now();
+    port.onMessage.addListener((m: { loggedIn?: boolean | null }) => {
+      runtime.session.loggedIn = m.loggedIn ?? null;
+      broadcast({ type: 'event', name: 'session:updated', snapshot: runtime.session });
+    });
+    port.onDisconnect.addListener(() => {
+      runtime.session.whatsappTabConnected = false;
+      runtime.session.loggedIn = null;
+      runtime.cancelRequested = runtime.runningCampaignId !== null ? runtime.cancelRequested : false;
+      broadcast({ type: 'event', name: 'session:updated', snapshot: runtime.session });
+    });
+  }
+});
+
+// Alarm keeps the SW eligible to wake; the loop itself lives while the SW is alive.
+chrome.alarms.create?.('relay:heartbeat', { periodInMinutes: 1 });
+chrome.alarms.onAlarm?.addListener(() => {
+  wakeAlarmSeen++;
+  // Re-arm an interrupted run conservatively: only resume if it was 'running' and a tab is connected.
+  void (async () => {
+    const campaigns = await listCampaigns();
+    const running = campaigns.find((c) => c.state === 'running');
+    if (running && !runtime.runningCampaignId && runtime.session.whatsappTabConnected) {
+      void runQueueLoop(running.id);
+    }
+  })();
+});
+
+chrome.action?.onClicked?.addListener(async () => {
+  const tabs = await chrome.tabs.query({ url: 'https://web.whatsapp.com/*' });
+  if (tabs[0]?.id) {
+    await chrome.tabs.update(tabs[0].id, { active: true });
+    await chrome.windows.update?.(tabs[0].windowId ?? chrome.windows.WINDOW_ID_CURRENT, { focused: true });
+    chrome.runtime.sendMessage({ type: 'event', name: 'session:updated', snapshot: runtime.session }).catch(() => undefined);
+  }
+});
+
+export type { QueueSummary };
