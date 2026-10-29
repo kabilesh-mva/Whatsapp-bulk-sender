@@ -27,17 +27,130 @@ import {
   deleteTemplate,
   getAllContacts,
 } from '../lib/db';
-import { MockMessagingAdapter } from '../lib/adapters/mockAdapter';
+import { MockMessagingAdapter, WhatsAppWebMessagingAdapter } from '../lib/adapters/mockAdapter';
+import type { MessagingAdapter, OutgoingMessage } from '../types/domain';
 import { computeSummary, pickDelay, processNextRecipient, type QueueDeps } from './queueEngine';
 import { assertTransition, canApplyIntent, validateStart, type QueueIntent } from './stateMachine';
 
 /**
  * Service worker: owns campaign state, runs the queue loop, and answers bridge
- * requests from the panel/popup. In this build the transport is always the mock
- * adapter; a real one plugs in behind the MessagingAdapter boundary only.
+ * requests from the panel/popup. The transport is selected in Settings → Transport:
+ * 'mock' (default, never sends) or 'whatsapp-web' (bridges to a connected tab).
  */
 
-const adapter = new MockMessagingAdapter({ latencyMs: [50, 150] });
+const mockAdapter = new MockMessagingAdapter({ latencyMs: [50, 150] });
+
+/* ---------------- WhatsApp Web bridge (isolated transport integration) ----------------
+ * Everything that touches a WhatsApp Web tab lives behind this narrow interface so it
+ * can be swapped for an official WhatsApp Business Platform adapter later. The content
+ * script keeps a long-lived port ('whatsapp-session'); while any port is open we know
+ * a tab exists, and sends are routed to it awaiting a real page acknowledgement.
+ * -------------------------------------------------------------------------------------- */
+interface WaSessionPort {
+  postMessage: (m: unknown) => void;
+  onMessage: chrome.events.Event<(m: unknown) => void>;
+  onDisconnect: chrome.events.Event<() => void>;
+}
+
+class ChromeWhatsAppWebBridge implements WhatsAppWebBridgeLike {
+  private ports = new Set<WaSessionPort>();
+  private pending = new Map<string, { resolve: (v: SendAck) => void; timer: ReturnType<typeof setTimeout> }>();
+  private nextTabId = 1;
+
+  constructor() {
+    chrome.runtime.onConnect.addListener((raw) => {
+      const port = raw as unknown as WaSessionPort & { sender?: { tab?: { id?: number } }; name: string };
+      if (port.name !== 'whatsapp-session') return;
+      const tabId = this.nextTabId++;
+      try {
+        port.postMessage({ type: 'relay:assign-tab', tabId });
+      } catch {
+        /* tab may already be closing */
+      }
+      this.ports.add(port);
+      port.onMessage.addListener((m) => this.handlePageMessage(m));
+      port.onDisconnect.addListener(() => {
+        this.ports.delete(port);
+        runtime.session.whatsappTabConnected = this.ports.size > 0;
+        runtime.session.loggedIn = null;
+        // Session loss must halt the queue transparently — never keep "sending" blind.
+        if (runtime.runningCampaignId) runtime.pauseRequested = true;
+        broadcast({ type: 'event', name: 'session:updated', snapshot: runtime.session });
+      });
+      runtime.session.whatsappTabConnected = true;
+      runtime.session.lastCheckedAt = Date.now();
+      broadcast({ type: 'event', name: 'session:updated', snapshot: runtime.session });
+    });
+  }
+
+  private handlePageMessage(m: unknown): void {
+    const msg = m as
+      | { type: 'session:state'; loggedIn?: boolean | null }
+      | { type: 'send:ack'; ackId?: string; ok?: boolean; errorCode?: string; errorMessage?: string };
+    if (!msg || typeof msg !== 'object') return;
+    if (msg.type === 'session:state') {
+      runtime.session.loggedIn = msg.loggedIn ?? null;
+      broadcast({ type: 'event', name: 'session:updated', snapshot: runtime.session });
+      return;
+    }
+    if (msg.type === 'send:ack' && msg.ackId) {
+      const p = this.pending.get(msg.ackId);
+      if (!p) return;
+      clearTimeout(p.timer);
+      this.pending.delete(msg.ackId);
+      p.resolve({ ok: !!msg.ok, errorCode: msg.errorCode, errorMessage: msg.errorMessage });
+    }
+  }
+
+  isTabConnected(): boolean {
+    return this.ports.size > 0;
+  }
+
+  dispatch(message: OutgoingMessage): Promise<SendAck> {
+    const target = [...this.ports][0];
+    if (!target) return Promise.resolve({ ok: false, errorCode: 'ADAPTER_UNAVAILABLE', errorMessage: 'No connected WhatsApp Web tab.' });
+    const ackId = crypto.randomUUID();
+    return new Promise<SendAck>((resolve) => {
+      const timer = setTimeout(() => {
+        this.pending.delete(ackId);
+        resolve({ ok: false, errorCode: 'PAGE_ACK_TIMEOUT', errorMessage: 'WhatsApp Web did not acknowledge the message in time. It may or may not have been delivered — check the chat before retrying.' });
+      }, SEND_ACK_TIMEOUT_MS);
+      this.pending.set(ackId, { resolve, timer });
+      try {
+        target.postMessage({ type: 'relay:send', ackId, message });
+      } catch (e) {
+        clearTimeout(timer);
+        this.pending.delete(ackId);
+        resolve({ ok: false, errorCode: 'PORT_DEAD', errorMessage: e instanceof Error ? e.message : String(e) });
+      }
+    });
+  }
+}
+
+interface SendAck {
+  ok: boolean;
+  errorCode?: string;
+  errorMessage?: string;
+}
+
+type WhatsAppWebBridgeLike = {
+  isTabConnected(): boolean;
+  dispatch(message: OutgoingMessage): Promise<SendAck>;
+};
+
+const SEND_ACK_TIMEOUT_MS = 30_000;
+const waBridge = new ChromeWhatsAppWebBridge();
+const whatsappWebAdapter = new WhatsAppWebMessagingAdapter(waBridge);
+
+async function activeAdapter(): Promise<MessagingAdapter> {
+  const settings = await loadSettings();
+  return settings.adapter === 'whatsapp-web' ? whatsappWebAdapter : mockAdapter;
+}
+
+async function adapterInfo(): Promise<{ kind: MessagingAdapter['kind']; label: string; available: boolean; session: SessionSnapshot }> {
+  const adapter = await activeAdapter();
+  return { kind: adapter.kind, label: adapter.label, available: await adapter.isAvailable(), session: runtime.session };
+}
 
 interface RuntimeState {
   runningCampaignId: string | null;
@@ -73,6 +186,7 @@ async function emitSummary(campaign: Campaign): Promise<QueueSummary> {
 let wakeAlarmSeen = 0;
 
 async function buildDeps(settings: AppSettings): Promise<QueueDeps> {
+  const adapter = settings.adapter === 'whatsapp-web' ? whatsappWebAdapter : mockAdapter;
   return {
     adapter,
     getContacts: getContactsByIds,
@@ -87,10 +201,10 @@ async function buildDeps(settings: AppSettings): Promise<QueueDeps> {
     random: Math.random,
     now: Date.now,
     isSessionAlive: async () => {
-      // Demo mode: the "session" is considered alive while the WhatsApp tab port exists
-      // OR when nothing has ever connected (pure browser-tab dev usage).
-      if (runtime.session.whatsappTabConnected) return true;
-      return runtime.session.lastCheckedAt === null;
+      // Mock transport works without a WhatsApp tab (pure browser/dev usage).
+      if (settings.adapter !== 'whatsapp-web') return true;
+      // Real transport: require a connected tab. Never send blindly into a dead session.
+      return waBridge.isTabConnected();
     },
   };
 }
@@ -198,7 +312,7 @@ async function handleIntent(id: string, intent: QueueIntent): Promise<unknown> {
         finalConfirmationGiven: true,
         recipientCount: campaign.contactIds.length,
         maxRecipients: Math.min(settings.queueDefaults.maxRecipients, campaign.settings.maxRecipients),
-        adapterAvailable: await adapter.isAvailable(),
+        adapterAvailable: await (await activeAdapter()).isAvailable(),
       });
       if (errors.length) throw new Error(errors.join(' '));
       await transition(campaign, 'ready');
@@ -212,7 +326,7 @@ async function handleIntent(id: string, intent: QueueIntent): Promise<unknown> {
         finalConfirmationGiven: true,
         recipientCount: campaign.contactIds.length,
         maxRecipients: Math.min(settings.queueDefaults.maxRecipients, campaign.settings.maxRecipients),
-        adapterAvailable: await adapter.isAvailable(),
+        adapterAvailable: await (await activeAdapter()).isAvailable(),
       });
       if (errors.length) throw new Error(errors.join(' '));
       await transition(campaign, 'running');
@@ -358,6 +472,8 @@ async function handle(req: BridgeRequest): Promise<unknown> {
       })());
     case 'session/snapshot':
       return { ...runtime.session, lastCheckedAt: Date.now() };
+    case 'adapter/info':
+      return adapterInfo();
     case 'data/deleteAll':
       return (async () => {
         runtime.cancelRequested = true;
@@ -400,23 +516,6 @@ chrome.runtime.onMessage.addListener(
   },
 );
 
-chrome.runtime.onConnect?.addListener((port) => {
-  if (port.name === 'whatsapp-session') {
-    runtime.session.whatsappTabConnected = true;
-    runtime.session.lastCheckedAt = Date.now();
-    port.onMessage.addListener((m: { loggedIn?: boolean | null }) => {
-      runtime.session.loggedIn = m.loggedIn ?? null;
-      broadcast({ type: 'event', name: 'session:updated', snapshot: runtime.session });
-    });
-    port.onDisconnect.addListener(() => {
-      runtime.session.whatsappTabConnected = false;
-      runtime.session.loggedIn = null;
-      runtime.cancelRequested = runtime.runningCampaignId !== null ? runtime.cancelRequested : false;
-      broadcast({ type: 'event', name: 'session:updated', snapshot: runtime.session });
-    });
-  }
-});
-
 // Alarm keeps the SW eligible to wake; the loop itself lives while the SW is alive.
 chrome.alarms.create?.('relay:heartbeat', { periodInMinutes: 1 });
 chrome.alarms.onAlarm?.addListener(() => {
@@ -425,7 +524,7 @@ chrome.alarms.onAlarm?.addListener(() => {
   void (async () => {
     const campaigns = await listCampaigns();
     const running = campaigns.find((c) => c.state === 'running');
-    if (running && !runtime.runningCampaignId && runtime.session.whatsappTabConnected) {
+    if (running && !runtime.runningCampaignId && waBridge.isTabConnected()) {
       void runQueueLoop(running.id);
     }
   })();
@@ -433,10 +532,15 @@ chrome.alarms.onAlarm?.addListener(() => {
 
 chrome.action?.onClicked?.addListener(async () => {
   const tabs = await chrome.tabs.query({ url: 'https://web.whatsapp.com/*' });
-  if (tabs[0]?.id) {
+  if (tabs[0]?.id != null) {
     await chrome.tabs.update(tabs[0].id, { active: true });
-    await chrome.windows.update?.(tabs[0].windowId ?? chrome.windows.WINDOW_ID_CURRENT, { focused: true });
-    chrome.runtime.sendMessage({ type: 'event', name: 'session:updated', snapshot: runtime.session }).catch(() => undefined);
+    if (tabs[0].windowId != null) {
+      await chrome.windows.update?.(tabs[0].windowId, { focused: true });
+    }
+    // Ask the content script to open the panel.
+    void chrome.tabs.sendMessage(tabs[0].id, { type: 'relay:toggle-panel' }).catch(() => undefined);
+  } else {
+    await chrome.tabs.create({ url: 'https://web.whatsapp.com/' });
   }
 });
 

@@ -6,6 +6,7 @@
  */
 import type {
   AppSettings,
+  MessagingAdapter,
   BridgeEvent,
   BridgeRequest,
   Campaign,
@@ -37,7 +38,24 @@ import {
 import { computeSummary, pickDelay, processNextRecipient, type QueueDeps } from '../background/queueEngine';
 import { assertTransition, canApplyIntent, validateStart, type QueueIntent } from '../background/stateMachine';
 
-const adapter = new MockMessagingAdapter({ latencyMs: [80, 220] });
+const mockAdapter = new MockMessagingAdapter({ latencyMs: [80, 220] });
+
+/**
+ * Stand-in for the WhatsApp Web transport when running outside the extension.
+ * It is NEVER available (there is no WhatsApp tab in a plain dev tab), so campaigns
+ * using it fail closed with ADAPTER_UNAVAILABLE instead of faking successes.
+ */
+const unavailableWaAdapter: MessagingAdapter = {
+  kind: 'whatsapp-web',
+  label: 'WhatsApp Web adapter (unavailable — this engine runs outside the extension)',
+  isAvailable: async () => false,
+  send: async () => ({
+    ok: false,
+    retryable: true,
+    errorCode: 'ADAPTER_UNAVAILABLE',
+    errorMessage: 'The WhatsApp Web transport only exists inside the loaded extension with a connected web.whatsapp.com tab.',
+  }),
+};
 
 interface LocalRuntime {
   runningCampaignId: string | null;
@@ -62,6 +80,7 @@ async function emitSummary(campaign: Campaign): Promise<QueueSummary> {
 }
 
 async function buildDeps(settings: AppSettings): Promise<QueueDeps> {
+  const adapter: MessagingAdapter = settings.adapter === 'whatsapp-web' ? unavailableWaAdapter : mockAdapter;
   return {
     adapter,
     getContacts: getContactsByIds,
@@ -75,7 +94,7 @@ async function buildDeps(settings: AppSettings): Promise<QueueDeps> {
     defaultCountry: settings.defaultCountryCode as AppSettings['defaultCountryCode'],
     random: Math.random,
     now: Date.now,
-    isSessionAlive: async () => true, // demo tab mode always has a "session"
+    isSessionAlive: async () => settings.adapter !== 'whatsapp-web', // no real WA session outside the extension
   };
 }
 
@@ -163,7 +182,7 @@ async function handleIntent(id: string, intent: QueueIntent): Promise<unknown> {
         finalConfirmationGiven: true,
         recipientCount: campaign.contactIds.length,
         maxRecipients: Math.min(settings.queueDefaults.maxRecipients, campaign.settings.maxRecipients),
-        adapterAvailable: await adapter.isAvailable(),
+        adapterAvailable: await (settings.adapter === 'whatsapp-web' ? unavailableWaAdapter : mockAdapter).isAvailable(),
       });
       if (errors.length) throw new Error(errors.join(' '));
       await transition(campaign, 'ready');
@@ -291,6 +310,11 @@ async function handle(req: BridgeRequest): Promise<unknown> {
       return req.settings;
     case 'session/snapshot':
       return { whatsappTabConnected: false, loggedIn: null, lastCheckedAt: Date.now() };
+    case 'adapter/info': {
+      const st = await loadSettings();
+      const active: MessagingAdapter = st.adapter === 'whatsapp-web' ? unavailableWaAdapter : mockAdapter;
+      return { kind: active.kind, label: active.label, available: await active.isAvailable(), session: { whatsappTabConnected: false, loggedIn: null, lastCheckedAt: Date.now() } };
+    }
     case 'data/deleteAll':
       runtime.cancelRequested = true;
       await deleteAllLocalData();

@@ -111,6 +111,9 @@ export interface QueueSettingsDefaults {
   requireFinalConfirmation: boolean;
 }
 
+/** Which transport the queue uses. `'mock'` NEVER sends real messages. */
+export type AdapterKind = 'mock' | 'whatsapp-web';
+
 export interface AppSettings {
   defaultCountryCode: string; // ISO-2, e.g. "US"
   locale: string; // e.g. "en"
@@ -118,6 +121,8 @@ export interface AppSettings {
   queueDefaults: QueueSettingsDefaults;
   optOutPhrases: string[];
   optOutMatcherEnabled: boolean;
+  /** Transport selection (settings screen). Defaults to the safe mock adapter. */
+  adapter: AdapterKind;
 }
 
 /** Structured event recorded per recipient attempt for full transparency. */
@@ -162,11 +167,12 @@ export type SendOutcome =
 /**
  * Narrow transport interface. The queue orchestrator only ever talks to this.
  * - MockMessagingAdapter: safe demo mode, no real messages.
- * - WhatsAppWebMessagingAdapterPlaceholder: isolated module reserved for a future
- *   WhatsApp Web runtime integration or official WhatsApp Business Platform API.
+ * - WhatsAppWebMessagingAdapter: isolated module bridging to a connected
+ *   WhatsApp Web tab (see src/content/whatsappRuntime.ts). Can later be replaced
+ *   by an official WhatsApp Business Platform adapter behind the same interface.
  */
 export interface MessagingAdapter {
-  readonly kind: 'mock' | 'whatsapp-web-placeholder';
+  readonly kind: AdapterKind;
   readonly label: string;
   isAvailable(): Promise<boolean>;
   send(message: OutgoingMessage): Promise<SendOutcome>;
@@ -237,6 +243,7 @@ export type BridgeRequest =
   | { type: 'settings/get' }
   | { type: 'settings/save'; settings: AppSettings }
   | { type: 'session/snapshot' }
+  | { type: 'adapter/info' }
   | { type: 'data/deleteAll' }
   | { type: 'data/export' };
 

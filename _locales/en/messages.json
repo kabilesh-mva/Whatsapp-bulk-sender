@@ -1,0 +1,14 @@
+{
+  "extensionName": {
+    "message": "Relay Campaigns",
+    "description": "Name of the extension."
+  },
+  "extensionDescription": {
+    "message": "Local-first campaign workspace for WhatsApp Web: contact import with E.164 normalization, template personalization, a transparent sending queue with pacing and pause/resume, per-recipient reports with CSV export, and a permanent suppression list for opt-outs. All data stays on your device.",
+    "description": "Description of the extension."
+  },
+  "actionTitle": {
+    "message": "Relay Campaigns",
+    "description": "Tooltip for the toolbar action button."
+  }
+}

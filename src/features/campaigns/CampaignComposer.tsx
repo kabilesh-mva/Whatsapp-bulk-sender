@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { CountryCode } from 'libphonenumber-js';
-import type { AttachmentMetadata, Campaign, Contact, ColumnMapping, ImportPreview, Template } from '../../types/domain';
+import type { AttachmentMetadata, Campaign, Contact, ColumnMapping, ImportPreview, SuppressionEntry, Template } from '../../types/domain';
 import { request } from '../../lib/bridge';
 import { buildImportPreview, guessMapping, parseCsv, parseSpreadsheetFile, type TabularData } from '../../lib/importParser';
 import { extractVariables, renderTemplate, contactVariableMap, validateTemplateVariables } from '../../lib/templateVars';
@@ -144,7 +144,50 @@ export function CampaignComposer({ onSaved }: { onSaved?: (campaignId: string) =
     : renderTemplate(draft.body, {});
   const missingVars = validateTemplateVariables(draft.body, availableFields).missing;
 
-  const suppressedCount = 0; // computed at send time by the engine (source of truth: suppression list)
+  /* ---------- recipient filters (rendered directly below the numbers/paste box) ---------- */
+
+  const [phoneFilter, setPhoneFilter] = useState('');
+  const [countryFilter, setCountryFilter] = useState<string>('all');
+  const [namedOnly, setNamedOnly] = useState(false);
+  const [includeSuppressed, setIncludeSuppressed] = useState(true);
+  const [suppressionEntries, setSuppressionEntries] = useState<SuppressionEntry[]>([]);
+
+  useEffect(() => {
+    void request<SuppressionEntry[]>({ type: 'suppression/list' }).then(setSuppressionEntries).catch(() => undefined);
+  }, []);
+
+  const suppressedSet = useMemo(
+    () => new Set(suppressionEntries.map((e) => e.normalizedPhone ?? e.phone).filter(Boolean)),
+    [suppressionEntries],
+  );
+
+  const countries = useMemo(() => {
+    const set = new Set<string>();
+    for (const c of draft.contacts) {
+      const m = /^\+(\d{1,3})/.exec(c.normalizedPhone);
+      if (m) set.add(m[1]);
+    }
+    return [...set].sort();
+  }, [draft.contacts]);
+
+  const filteredContacts = useMemo(() => {
+    const q = phoneFilter.trim().toLowerCase();
+    return draft.contacts.filter((c) => {
+      if (!includeSuppressed && suppressedSet.has(c.normalizedPhone)) return false;
+      if (namedOnly && !(c.fields['name'] ?? '').trim()) return false;
+      if (q && !`${c.normalizedPhone} ${c.phone} ${(c.fields['name'] ?? '').toLowerCase()}`.includes(q)) return false;
+      if (countryFilter !== 'all' && !c.normalizedPhone.startsWith(`+${countryFilter}`)) return false;
+      return true;
+    });
+  }, [draft.contacts, phoneFilter, countryFilter, namedOnly, includeSuppressed, suppressedSet]);
+
+  // The campaign is built from the *filtered* selection — filters decide who gets sent to.
+  const effectiveContacts = filteredContacts;
+
+  const suppressedInSelection = useMemo(
+    () => draft.contacts.filter((c) => suppressedSet.has(c.normalizedPhone)).length,
+    [draft.contacts, suppressedSet],
+  );
 
   /* ---------- steps 2-4 ---------- */
 
@@ -182,7 +225,7 @@ export function CampaignComposer({ onSaved }: { onSaved?: (campaignId: string) =
       id: draft.id,
       name: draft.name.trim() || 'Untitled campaign',
       messageTemplate: { body: draft.body, attachment: draft.attachment ?? undefined },
-      contactIds: draft.contacts.map((c) => c.id),
+      contactIds: effectiveContacts.map((c) => c.id),
       state,
       settings: {
         minDelayMs: Math.max(0, draft.minDelaySec) * 1000,
@@ -196,7 +239,7 @@ export function CampaignComposer({ onSaved }: { onSaved?: (campaignId: string) =
       startedAt: null,
       completedAt: null,
     }),
-    [draft, settings],
+    [draft, settings, effectiveContacts],
   );
 
   const saveDraft = useCallback(async () => {
@@ -204,7 +247,7 @@ export function CampaignComposer({ onSaved }: { onSaved?: (campaignId: string) =
     setError(null);
     try {
       const campaign = buildCampaign('draft');
-      await request({ type: 'campaign/saveDraft', campaign, contacts: draft.contacts });
+      await request({ type: 'campaign/saveDraft', campaign, contacts: effectiveContacts });
       if (draft.attachment && draft.attachmentDataUrl) {
         await putAttachmentLocal(draft.attachment.dataKey!, draft.attachmentDataUrl);
       }
@@ -222,7 +265,7 @@ export function CampaignComposer({ onSaved }: { onSaved?: (campaignId: string) =
     setError(null);
     try {
       const campaign = buildCampaign('draft');
-      await request({ type: 'campaign/saveDraft', campaign, contacts: draft.contacts });
+      await request({ type: 'campaign/saveDraft', campaign, contacts: effectiveContacts });
       if (draft.attachment && draft.attachmentDataUrl) {
         await putAttachmentLocal(draft.attachment.dataKey!, draft.attachmentDataUrl);
       }
@@ -294,10 +337,11 @@ export function CampaignComposer({ onSaved }: { onSaved?: (campaignId: string) =
               id="paste-csv"
               className="rc-textarea"
               placeholder={'phone,name,company\n+14155550101,Alex Doe,Acme'}
-              onChange={(e) => pasteCsv(e.target.value)}
+              onBlur={(e) => pasteCsv(e.target.value)}
               rows={3}
             />
             {fileName && <p>Loaded: <strong>{fileName}</strong> ({tabular?.rows.length ?? 0} rows)</p>}
+            <p className="rc-devices-note">Paste your rows, then click out of the box (or press Tab) to load them.</p>
           </section>
 
           {tabular && (

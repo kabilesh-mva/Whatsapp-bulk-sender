@@ -33,6 +33,7 @@ export const DEFAULT_SETTINGS: AppSettings = {
   },
   optOutPhrases: ['stop', 'unsubscribe', 'opt out', 'remove me'],
   optOutMatcherEnabled: false,
+  adapter: 'mock',
 };
 
 let dbPromise: Promise<IDBPDatabase> | null = null;
@@ -200,6 +201,7 @@ function mergeSettings(base: AppSettings, raw?: Partial<AppSettings>): AppSettin
     ...raw,
     queueDefaults: { ...base.queueDefaults, ...(raw.queueDefaults ?? {}) },
     optOutPhrases: raw.optOutPhrases ?? base.optOutPhrases,
+    adapter: raw.adapter === 'whatsapp-web' ? 'whatsapp-web' : 'mock',
   };
 }
 
