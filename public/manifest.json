@@ -4,8 +4,14 @@
   "version": "0.1.0",
   "description": "__MSG_extensionDescription__",
   "default_locale": "en",
-  "permissions": ["storage", "alarms"],
-  "host_permissions": ["https://web.whatsapp.com/*"],
+  "permissions": [
+    "storage",
+    "alarms",
+    "tabs"
+  ],
+  "host_permissions": [
+    "https://web.whatsapp.com/*"
+  ],
   "background": {
     "service_worker": "background.js",
     "type": "module"
@@ -28,15 +34,25 @@
   },
   "content_scripts": [
     {
-      "matches": ["https://web.whatsapp.com/*"],
-      "js": ["content.js"],
+      "matches": [
+        "https://web.whatsapp.com/*"
+      ],
+      "js": [
+        "content.js"
+      ],
       "run_at": "document_idle"
     }
   ],
   "web_accessible_resources": [
     {
-      "resources": ["panel/index.html", "assets/*", "icons/*"],
-      "matches": ["https://web.whatsapp.com/*"]
+      "resources": [
+        "panel/*",
+        "assets/*",
+        "icons/*"
+      ],
+      "matches": [
+        "https://web.whatsapp.com/*"
+      ]
     }
   ]
 }
