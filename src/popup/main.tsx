@@ -54,7 +54,17 @@ function Popup() {
     if (tabs[0]?.id != null) {
       await chrome.tabs.update(tabs[0].id, { active: true });
       if (tabs[0].windowId != null) await chrome.windows.update(tabs[0].windowId, { focused: true });
-      chrome.tabs.sendMessage(tabs[0].id, { type: 'relay:toggle-panel' }).catch(() => undefined);
+      // Ensure the content script is present (it may be missing on a tab opened
+      // before the extension was installed/reloaded), then explicitly OPEN the
+      // panel — toggle semantics here caused "click does nothing" flakiness.
+      try {
+        await chrome.tabs.sendMessage(tabs[0].id, { type: 'relay:ping' });
+      } catch {
+        const manifest = chrome.runtime.getManifest();
+        const file = manifest.content_scripts?.[0]?.js?.[0];
+        if (file) await chrome.scripting.executeScript({ target: { tabId: tabs[0].id }, files: [file] });
+      }
+      chrome.tabs.sendMessage(tabs[0].id, { type: 'relay:set-panel-open' }).catch(() => undefined);
     } else {
       await chrome.tabs.create({ url: 'https://web.whatsapp.com/' });
     }

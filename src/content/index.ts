@@ -17,10 +17,15 @@ import { sendViaWhatsAppWeb } from './whatsappRuntime';
 
 const PANEL_HOST_ID = 'relay-campaigns-panel-host';
 const TOGGLE_BTN_ID = 'relay-campaigns-toggle';
-const PANEL_WIDTH = 480;
+// Panel sizing defaults — the user can drag the panel's left edge to resize and
+// the choice is remembered (see `rc:panel-width` in chrome.storage.local).
+const PANEL_MIN_WIDTH = 420;
+const PANEL_MAX_FRACTION = 0.92;
+const PANEL_DEFAULT_WIDTH = 560;
 
 let panelOpen = false;
 let port: chrome.runtime.Port | null = null;
+let userWidthPref = 0; // 0 = no saved preference yet
 
 function isLoggedInShell(): boolean {
   // Presence of the app layout (not any message node) is enough to know the shell rendered.
@@ -72,6 +77,8 @@ function ensurePort(): void {
     port.onMessage.addListener((m: unknown) => {
       const msg = m as { type?: string };
       if (msg?.type === 'relay:toggle-panel') togglePanel();
+      if (msg?.type === 'relay:set-panel-open') setPanelOpen(true);
+      if (msg?.type === 'relay:set-panel-closed') setPanelOpen(false);
       if (msg?.type === 'relay:send') void handleOutboundSend(m as OutboundSendRequest);
     });
   } catch {
@@ -114,7 +121,71 @@ function createToggle(): void {
 }
 
 function panelWidth(): number {
-  return Math.min(PANEL_WIDTH, Math.round(window.innerWidth * 0.92));
+  const max = Math.round(window.innerWidth * PANEL_MAX_FRACTION);
+  const min = Math.min(PANEL_MIN_WIDTH, max); // on tiny viewports, shrink the minimum too
+  const desired = userWidthPref > 0 ? userWidthPref : PANEL_DEFAULT_WIDTH;
+  return Math.max(min, Math.min(desired, max));
+}
+
+/** Load the saved width preference once (best-effort). */
+function loadWidthPref(): void {
+  try {
+    chrome.storage?.local?.get(['rc:panel-width'], (res) => {
+      const w = Number(res?.['rc:panel-width']);
+      if (Number.isFinite(w) && w >= 280) {
+        userWidthPref = w;
+        setPanelPosition(panelOpen);
+      }
+    });
+  } catch {
+    /* storage unavailable — keep default */
+  }
+}
+
+function saveWidthPref(w: number): void {
+  userWidthPref = w;
+  try {
+    chrome.storage?.local?.set({ 'rc:panel-width': w });
+  } catch {
+    /* ignore — preference simply won't persist */
+  }
+}
+
+/** Draggable resize handle rendered inside the iframe's left edge. */
+function attachResizeHandle(frame: HTMLIFrameElement): void {
+  if (frame.dataset.rcResizable === '1') return;
+  frame.dataset.rcResizable = '1';
+  const startXs: number[] = [];
+  const startWs: number[] = [];
+  let dragging = false;
+  frame.addEventListener('mousedown', (e) => {
+    const rect = frame.getBoundingClientRect();
+    // Only react to presses within ~7px of the left edge (the grab strip).
+    if (e.clientX - rect.left > 7) return;
+    dragging = true;
+    startXs.push(e.clientX);
+    startWs.push(rect.width);
+    document.body.style.userSelect = 'none';
+    e.preventDefault();
+  });
+  window.addEventListener('mousemove', (e) => {
+    if (!dragging || startXs.length === 0) return;
+    const dx = startXs[startXs.length - 1] - e.clientX; // dragging left = wider
+    const next = Math.round(startWs[startWs.length - 1] + dx);
+    const max = Math.round(window.innerWidth * PANEL_MAX_FRACTION);
+    const min = Math.min(PANEL_MIN_WIDTH, max);
+    frame.style.width = `${Math.max(min, Math.min(next, max))}px`;
+    moveToggle(true);
+  });
+  window.addEventListener('mouseup', () => {
+    if (!dragging) return;
+    dragging = false;
+    document.body.style.userSelect = '';
+    const w = Math.round(frame.getBoundingClientRect().width);
+    if (w > 0) saveWidthPref(w);
+    startXs.length = 0;
+    startWs.length = 0;
+  });
 }
 
 function mountPanel(): HTMLIFrameElement {
@@ -137,34 +208,66 @@ function mountPanel(): HTMLIFrameElement {
     background: '#f6f7fb',
     boxShadow: '0 8px 30px rgba(15,23,42,.28)',
     transition: 'right .18s ease-out',
+    resize: 'horizontal',
   } as CSSStyleDeclaration);
   document.body.appendChild(frame);
+  attachResizeHandle(frame);
   return frame;
 }
 
 function setPanelPosition(open: boolean): void {
   const frame = document.getElementById(PANEL_HOST_ID) as HTMLIFrameElement | null;
   if (!frame) return;
-  frame.style.width = `${panelWidth()}px`;
-  frame.style.right = open ? '0' : `-${panelWidth()}px`;
+  // While the user is actively dragging, don't fight the drag.
+  if (frame.dataset.rcDragging !== '1') {
+    frame.style.width = `${panelWidth()}px`;
+  }
+  frame.style.right = open ? '0' : `-${frame.getBoundingClientRect().width}px`;
   moveToggle(open);
 }
 
-function togglePanel(): void {
+/**
+ * Explicit open/close commands from the popup / keyboard shortcut.
+ * `open` = true forces visible, false forces hidden, undefined toggles.
+ */
+function setPanelOpen(open?: boolean): void {
+  const next = open ?? !panelOpen;
+  if (next === panelOpen) {
+    // Already in the requested state — just make sure geometry is right.
+    if (next) setPanelPosition(true);
+    return;
+  }
   ensurePort();
-  panelOpen = !panelOpen;
+  panelOpen = next;
   if (panelOpen) mountPanel();
   setPanelPosition(panelOpen);
+}
+
+function togglePanel(): void {
+  setPanelOpen();
 }
 
 function start(): void {
   createToggle();
   ensurePort();
   reportSession();
-  // Messages from the popup ("open the panel") arrive through this tab's channel.
+  loadWidthPref();
+  // Messages from the popup / service worker ("open or close the panel") arrive here.
   chrome.runtime.onMessage.addListener((msg: unknown) => {
-    const m = msg as { type?: string };
+    const m = msg as { type?: string; open?: boolean };
     if (m?.type === 'relay:toggle-panel') togglePanel();
+    if (m?.type === 'relay:set-panel-open') setPanelOpen(true);
+    if (m?.type === 'relay:set-panel-closed') setPanelOpen(false);
+  });
+  // Alt+Shift+R toggles the panel anywhere on the page (ignored while typing).
+  window.addEventListener('keydown', (e) => {
+    if (e.altKey && e.shiftKey && (e.key === 'R' || e.key === 'r')) {
+      const t = e.target as HTMLElement | null;
+      const tag = t?.tagName;
+      if (tag === 'INPUT' || tag === 'TEXTAREA' || t?.isContentEditable) return;
+      e.preventDefault();
+      togglePanel();
+    }
   });
   // Light polling only for shell presence — no message data is ever read.
   setInterval(() => {
