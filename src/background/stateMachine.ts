@@ -1,4 +1,4 @@
-import type { CampaignState } from '../../types/domain';
+import type { CampaignState } from '../types/domain';
 
 /**
  * Pure campaign state machine. The service worker is the only component that

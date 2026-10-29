@@ -62,7 +62,7 @@ function guessTypeFromName(name: string): string {
     m4a: 'audio/mp4',
     aac: 'audio/aac',
     mp4: 'video/mp4',
-    3gp: 'video/3gpp',
+    '3gp': 'video/3gpp',
     webm: 'video/webm',
   };
   return map[ext] ?? 'application/octet-stream';

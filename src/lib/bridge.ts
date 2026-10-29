@@ -32,8 +32,9 @@ export function subscribe(listener: Listener): () => void {
       if (msg && msg.type === 'event') listener(msg);
     });
   } else {
-    const { localEngine } = await import('./localEngine');
-    localEngine.subscribe(listener);
+    void import('./localEngine').then(({ localEngine }) => {
+      localEngine.subscribe(listener);
+    });
   }
   return () => listeners.delete(listener);
 }

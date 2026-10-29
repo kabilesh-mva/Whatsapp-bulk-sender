@@ -18,6 +18,7 @@ export default defineConfig({
     emptyOutDir: true,
     sourcemap: false,
     target: 'chrome110',
+    modulePreload: false,
     rollupOptions: {
       input: {
         panel: resolve(__dirname, 'src/panel/index.html'),

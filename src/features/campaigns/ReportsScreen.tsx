@@ -1,44 +1,59 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import type { Campaign, Contact, RecipientResult } from '../../types/domain';
 import { request } from '../../lib/bridge';
-import { buildReportRows, filterRows, reportToCsv, statusLabel, type ReportRow } from '../../lib/reports';
+import { buildReportRows, reportToCsv } from '../../lib/reports';
 import { downloadTextFile } from '../../lib/importParser';
 
-/**
- * Reports: campaign list with summary + per-recipient local result log,
- * filtering/search and CSV export. No delivery/read claims — statuses are
- * exactly what the queue recorded.
- */
+interface CampaignStats {
+  campaign: Campaign;
+  total: number;
+  sent: number;
+  failed: number;
+  skipped: number;
+  pending: number;
+  results: RecipientResult[];
+}
 
 export function ReportsScreen() {
   const [campaigns, setCampaigns] = useState<Campaign[]>([]);
-  const [selectedId, setSelectedId] = useState<string>('');
-  const [results, setResults] = useState<RecipientResult[]>([]);
+  const [statsMap, setStatsMap] = useState<Record<string, CampaignStats>>({});
   const [contacts, setContacts] = useState<Contact[]>([]);
-  const [query, setQuery] = useState('');
-  const [status, setStatus] = useState<RecipientResult['status'] | 'all'>('all');
-  const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
 
-  useEffect(() => {
-    void request<Campaign[]>({ type: 'campaign/list' })
-      .then((list) => {
-        setCampaigns(list);
-        if (list[0]) setSelectedId(list[0].id);
-      })
-      .catch((e) => setError(String(e)));
-  }, []);
-
-  const loadDetail = useCallback(async (id: string) => {
-    if (!id) return;
+  const loadData = useCallback(async () => {
     setLoading(true);
+    setError(null);
     try {
-      const [r, c] = await Promise.all([
-        request<RecipientResult[]>({ type: 'campaign/results', id }),
+      const [list, contactList] = await Promise.all([
+        request<Campaign[]>({ type: 'campaign/list' }),
         request<Contact[]>({ type: 'contacts/list' }),
       ]);
-      setResults(r);
-      setContacts(c);
+      setCampaigns(list);
+      setContacts(contactList);
+
+      const stats: Record<string, CampaignStats> = {};
+      await Promise.all(
+        list.map(async (c) => {
+          const results = await request<RecipientResult[]>({ type: 'campaign/results', id: c.id });
+          const sent = results.filter((r) => r.status === 'sent').length;
+          const failed = results.filter((r) => r.status === 'failed').length;
+          const skipped = results.filter((r) => r.status.startsWith('skipped') || r.status.startsWith('blocked')).length;
+          const total = c.contactIds.length;
+          const pending = Math.max(0, total - (sent + failed + skipped));
+
+          stats[c.id] = {
+            campaign: c,
+            total,
+            sent,
+            failed,
+            skipped,
+            pending,
+            results,
+          };
+        }),
+      );
+      setStatsMap(stats);
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
     } finally {
@@ -47,126 +62,176 @@ export function ReportsScreen() {
   }, []);
 
   useEffect(() => {
-    void loadDetail(selectedId);
-  }, [selectedId, loadDetail]);
+    void loadData();
+  }, [loadData]);
 
-  const selected = campaigns.find((c) => c.id === selectedId);
+  // Overall totals across all campaigns
+  const overall = useMemo(() => {
+    let attempted = 0;
+    let sent = 0;
+    let pending = 0;
+    let skipped = 0;
+    let failed = 0;
 
-  const rows: ReportRow[] = useMemo(() => {
-    if (!selected) return [];
+    for (const s of Object.values(statsMap)) {
+      attempted += s.total;
+      sent += s.sent;
+      pending += s.pending;
+      skipped += s.skipped;
+      failed += s.failed;
+    }
+
+    return { attempted, sent, pending, skipped, failed };
+  }, [statsMap]);
+
+  const downloadCsv = (campaignId: string) => {
+    const s = statsMap[campaignId];
+    if (!s) return;
     const byId = new Map(contacts.map((c) => [c.id, c]));
-    return buildReportRows(selected, results, byId);
-  }, [selected, results, contacts]);
+    const rows = buildReportRows(s.campaign, s.results, byId);
+    const csv = reportToCsv(rows);
+    downloadTextFile(`${s.campaign.name || 'campaign'}-report.csv`, csv, 'text/csv;charset=utf-8');
+  };
 
-  const filtered = useMemo(() => filterRows(rows, query, status), [rows, query, status]);
-
-  const summaryOf = useCallback(
-    (c: Campaign): string => {
-      const rs = c.id === selectedId ? results : [];
-      if (c.id !== selectedId) return `${c.contactIds.length} recipients`;
-      const sent = rs.filter((r) => r.status === 'sent').length;
-      const skipped = rs.filter((r) => r.status.startsWith('skipped')).length;
-      const failed = rs.filter((r) => r.status === 'failed').length;
-      return `sent ${sent} · skipped ${skipped} · failed ${failed}`;
-    },
-    [selectedId, results],
-  );
+  const deleteCampaign = async (campaignId: string) => {
+    if (!window.confirm('Are you sure you want to delete this campaign?')) return;
+    try {
+      await request({ type: 'campaign/delete', id: campaignId });
+      await loadData();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    }
+  };
 
   return (
-    <div>
-      {error && <div className="rc-alert rc-alert-danger" role="alert">{error}</div>}
+    <div className="wa-reports-container">
+      {error && (
+        <div className="wa-alert wa-alert-danger" role="alert">
+          {error}
+        </div>
+      )}
 
-      <section className="rc-card">
-        <h2>Campaigns</h2>
+      {/* Total Summary Section */}
+      <div className="wa-section-title">
+        <span className="wa-icon">⚙</span> Total Summary
+      </div>
+
+      <div className="wa-summary-grid">
+        <div className="wa-summary-card">
+          <div className="wa-summary-label">↗ Attempted</div>
+          <div className="wa-summary-value">{overall.attempted}</div>
+        </div>
+
+        <div className="wa-summary-card">
+          <div className="wa-summary-label">🗹 Sent</div>
+          <div className="wa-summary-value wa-val-success">{overall.sent}</div>
+        </div>
+
+        <div className="wa-summary-card">
+          <div className="wa-summary-label">⌛ Pending</div>
+          <div className="wa-summary-value wa-val-muted">{overall.pending}</div>
+        </div>
+
+        <div className="wa-summary-card">
+          <div className="wa-summary-label">⊘ Skipped (opt-out)</div>
+          <div className="wa-summary-value wa-val-danger">{overall.skipped}</div>
+        </div>
+
+        <div className="wa-summary-card">
+          <div className="wa-summary-label">⤬ No. unavailable</div>
+          <div className="wa-summary-value wa-val-warning">{overall.failed}</div>
+        </div>
+      </div>
+
+      {/* Past Campaign Section */}
+      <div className="wa-section-title" style={{ marginTop: '20px' }}>
+        <span className="wa-icon">📅</span> Past Campaign
+      </div>
+
+      <div className="wa-card wa-table-card">
         {campaigns.length === 0 ? (
-          <div className="rc-empty">No campaigns yet.</div>
+          <div className="wa-empty-state">
+            {loading ? 'Loading past campaigns...' : 'No past campaigns yet. Send your first campaign!'}
+          </div>
         ) : (
-          <table className="rc-table">
+          <table className="wa-table">
             <thead>
-              <tr><th>Name</th><th>Date</th><th>Status</th><th>Recipients</th><th>Summary</th><th /></tr>
+              <tr>
+                <th>Campaign</th>
+                <th>Total</th>
+                <th>Sent</th>
+                <th>No. Unavailable</th>
+                <th>Skipped (opt-out)</th>
+                <th style={{ textAlign: 'right' }}>Action</th>
+              </tr>
             </thead>
             <tbody>
-              {campaigns.map((c) => (
-                <tr key={c.id}>
-                  <td>{c.name}</td>
-                  <td>{new Date(c.createdAt).toLocaleDateString()}</td>
-                  <td><span className="rc-badge" data-state={c.state}>{c.state}</span></td>
-                  <td>{c.contactIds.length}</td>
-                  <td className="rc-devices-note">{summaryOf(c)}</td>
-                  <td>
-                    <button className="rc-btn" onClick={() => setSelectedId(c.id)} aria-label={`View report for ${c.name}`}>
-                      View
-                    </button>
-                  </td>
-                </tr>
-              ))}
+              {campaigns.map((c) => {
+                const s = statsMap[c.id];
+                const total = s?.total ?? c.contactIds.length;
+                const sent = s?.sent ?? 0;
+                const failed = s?.failed ?? 0;
+                const skipped = s?.skipped ?? 0;
+
+                return (
+                  <tr key={c.id}>
+                    <td>
+                      <div className="wa-campaign-cell">
+                        <span className="wa-campaign-icon">💬</span>
+                        <div>
+                          <div className="wa-campaign-name">{c.name || 'Campaign'}</div>
+                          <div className="wa-campaign-date">
+                            {new Date(c.createdAt).toLocaleDateString('en-GB', {
+                              day: '2-digit',
+                              month: 'short',
+                              hour: '2-digit',
+                              minute: '2-digit',
+                            })}
+                          </div>
+                        </div>
+                      </div>
+                    </td>
+                    <td>{total}</td>
+                    <td className="wa-val-success" style={{ fontWeight: 600 }}>
+                      {sent}
+                    </td>
+                    <td className="wa-val-warning" style={{ fontWeight: 600 }}>
+                      {failed}
+                    </td>
+                    <td>{skipped > 0 ? skipped : '—'}</td>
+                    <td style={{ textAlign: 'right' }}>
+                      <div className="wa-action-buttons">
+                        <button
+                          type="button"
+                          className="wa-btn-icon"
+                          title="Download CSV report"
+                          onClick={() => downloadCsv(c.id)}
+                        >
+                          📥
+                        </button>
+                        <button
+                          type="button"
+                          className="wa-btn-icon"
+                          title="Delete campaign"
+                          onClick={() => deleteCampaign(c.id)}
+                        >
+                          🗑️
+                        </button>
+                      </div>
+                    </td>
+                  </tr>
+                );
+              })}
             </tbody>
           </table>
         )}
-      </section>
 
-      {selected && (
-        <section className="rc-card">
-          <h2>Results — {selected.name}</h2>
-          <div className="rc-row">
-            <input
-              className="rc-input"
-              style={{ flex: 2 }}
-              type="search"
-              placeholder="Search name, phone, error…"
-              aria-label="Search results"
-              value={query}
-              onChange={(e) => setQuery(e.target.value)}
-            />
-            <select
-              className="rc-select"
-              style={{ flex: 1 }}
-              aria-label="Filter by status"
-              value={status}
-              onChange={(e) => setStatus(e.target.value as RecipientResult['status'] | 'all')}
-            >
-              <option value="all">All statuses</option>
-              {(['queued', 'sent', 'skipped_suppression', 'skipped_invalid_number', 'failed'] as const).map((s) => (
-                <option key={s} value={s}>{statusLabel(s)}</option>
-              ))}
-            </select>
-            <button
-              className="rc-btn rc-btn-primary"
-              onClick={() => downloadTextFile(`report-${selected.name.replace(/\W+/g, '-')}.csv`, reportToCsv(filtered))}
-              disabled={filtered.length === 0}
-            >
-              Export CSV
-            </button>
+        {campaigns.length > 0 && (
+          <div className="wa-table-footer">
+            <span>Showing 1-{campaigns.length} of {campaigns.length}</span>
           </div>
-          {loading ? (
-            <p role="status">Loading…</p>
-          ) : filtered.length === 0 ? (
-            <div className="rc-empty">No matching results.</div>
-          ) : (
-            <div style={{ maxHeight: 320, overflowY: 'auto', marginTop: 8 }}>
-              <table className="rc-table">
-                <thead>
-                  <tr><th>Contact</th><th>Phone</th><th>Status</th><th>When</th><th>Detail</th></tr>
-                </thead>
-                <tbody>
-                  {filtered.map((r, i) => (
-                    <tr key={`${r.normalizedPhone}-${i}`}>
-                      <td>{r.contactName || '—'}</td>
-                      <td>{r.normalizedPhone}</td>
-                      <td><span className="rc-badge">{statusLabel(r.status)}</span></td>
-                      <td>{new Date(r.timestampISO).toLocaleString()}</td>
-                      <td className="rc-devices-note">{r.errorCode}{r.errorMessage ? ` — ${r.errorMessage}` : ''}</td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
-          )}
-          <p className="rc-devices-note">
-            Statuses reflect only what the local queue recorded. This build does not verify message delivery or reads.
-          </p>
-        </section>
-      )}
+        )}
+      </div>
     </div>
   );
 }

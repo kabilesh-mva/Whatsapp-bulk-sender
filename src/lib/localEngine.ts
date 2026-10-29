@@ -4,12 +4,14 @@
  * It reuses the same pure modules: db (with memory fallback for settings/suppression),
  * state machine, queue engine and mock adapter. This is what powers `npm run dev`.
  */
+import type { CountryCode } from 'libphonenumber-js';
 import type {
   AppSettings,
   MessagingAdapter,
   BridgeEvent,
   BridgeRequest,
   Campaign,
+  QueueEvent,
   QueueSummary,
 } from '../types/domain';
 import { MockMessagingAdapter } from './adapters/mockAdapter';
@@ -87,11 +89,11 @@ async function buildDeps(settings: AppSettings): Promise<QueueDeps> {
     getResults: getResultsForCampaign,
     saveResult: putResult,
     logEvent: async (e) => {
-      await addEvent({ ...e, id: crypto.randomUUID(), timestamp: e.timestamp ?? Date.now() });
+      await addEvent({ ...e, id: crypto.randomUUID(), timestamp: e.timestamp ?? Date.now() } as QueueEvent);
     },
     saveCampaign: putCampaign,
     loadSuppression,
-    defaultCountry: settings.defaultCountryCode as AppSettings['defaultCountryCode'],
+    defaultCountry: settings.defaultCountryCode as CountryCode,
     random: Math.random,
     now: Date.now,
     isSessionAlive: async () => settings.adapter !== 'whatsapp-web', // no real WA session outside the extension

@@ -606,7 +606,7 @@ export function CampaignComposer({ onSaved }: { onSaved?: (campaignId: string) =
         </>
       )}
 
-      {step === 'consent' && <ConsentControls draft={draft} setDraft={setDraft} />}
+      {step === 'consent' && <ConsentControls draft={draft} setDraft={setDraft} onNext={() => setStep('review')} />}
 
       {step === 'review' && (
         <ReviewScreen
@@ -627,9 +627,11 @@ export function CampaignComposer({ onSaved }: { onSaved?: (campaignId: string) =
 function ConsentControls({
   draft,
   setDraft,
+  onNext,
 }: {
   draft: DraftState;
   setDraft: React.Dispatch<React.SetStateAction<DraftState>>;
+  onNext: () => void;
 }) {
   const { settings } = useApp();
   return (
@@ -698,7 +700,7 @@ function ConsentControls({
           </div>
         </div>
         <div className="rc-row" style={{ marginTop: 10 }}>
-          <button className="rc-btn rc-btn-primary" onClick={() => setStep('review')} disabled={!draft.consentConfirmed}>
+          <button className="rc-btn rc-btn-primary" onClick={onNext} disabled={!draft.consentConfirmed}>
             To review →
           </button>
         </div>

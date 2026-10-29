@@ -1,9 +1,11 @@
+import type { CountryCode } from 'libphonenumber-js';
 import type {
   AppSettings,
   BridgeEvent,
   BridgeRequest,
   BridgeResponse,
   Campaign,
+  QueueEvent,
   QueueSummary,
   SessionSnapshot,
 } from '../types/domain';
@@ -26,6 +28,8 @@ import {
   putTemplate,
   deleteTemplate,
   getAllContacts,
+  putContacts,
+  deleteCampaign,
 } from '../lib/db';
 import { MockMessagingAdapter, WhatsAppWebMessagingAdapter } from '../lib/adapters/mockAdapter';
 import type { MessagingAdapter, OutgoingMessage } from '../types/domain';
@@ -193,11 +197,11 @@ async function buildDeps(settings: AppSettings): Promise<QueueDeps> {
     getResults: getResultsForCampaign,
     saveResult: putResult,
     logEvent: async (e) => {
-      await addEvent({ ...e, id: crypto.randomUUID(), timestamp: e.timestamp ?? Date.now() });
+      await addEvent({ ...e, id: crypto.randomUUID(), timestamp: e.timestamp ?? Date.now() } as QueueEvent);
     },
     saveCampaign: putCampaign,
     loadSuppression,
-    defaultCountry: settings.defaultCountryCode as AppSettings['defaultCountryCode'],
+    defaultCountry: settings.defaultCountryCode as CountryCode,
     random: Math.random,
     now: Date.now,
     isSessionAlive: async () => {
@@ -388,7 +392,6 @@ async function handle(req: BridgeRequest): Promise<unknown> {
       const existing = await getCampaign(campaign.id);
       const next: Campaign = { ...campaign, createdAt: existing?.createdAt ?? campaign.createdAt };
       if (existing && existing.state !== campaign.state) assertTransition(existing.state, campaign.state);
-      const { putContacts } = await import('../lib/db');
       await putContacts(contacts);
       await putCampaign(next);
       return next;
@@ -407,7 +410,6 @@ async function handle(req: BridgeRequest): Promise<unknown> {
       return handleIntent(req.id, 'retryFailed');
     case 'campaign/delete':
       return (async () => {
-        const { deleteCampaign } = await import('../lib/db');
         await deleteCampaign(req.id);
         return { ok: true };
       })();
@@ -469,7 +471,7 @@ async function handle(req: BridgeRequest): Promise<unknown> {
       return (async () => {
         await saveSettings(req.settings);
         return req.settings;
-      })());
+      })();
     case 'session/snapshot':
       return { ...runtime.session, lastCheckedAt: Date.now() };
     case 'adapter/info':
