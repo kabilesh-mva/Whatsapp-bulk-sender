@@ -1113,3 +1113,16 @@
   color: #9ca3af;
   font-size: 13px;
 }
+
+.rc-check {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 13px;
+  cursor: pointer;
+}
+.rc-check input[type='checkbox'] {
+  width: 15px;
+  height: 15px;
+  accent-color: var(--rc-primary, #00a884);
+}

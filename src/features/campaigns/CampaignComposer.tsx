@@ -164,6 +164,7 @@ export function CampaignComposer({ onSaved }: { onSaved?: (campaignId: string) =
   const countries = useMemo(() => {
     const set = new Set<string>();
     for (const c of draft.contacts) {
+      if (!c.normalizedPhone) continue;
       const m = /^\+(\d{1,3})/.exec(c.normalizedPhone);
       if (m) set.add(m[1]);
     }
@@ -173,10 +174,11 @@ export function CampaignComposer({ onSaved }: { onSaved?: (campaignId: string) =
   const filteredContacts = useMemo(() => {
     const q = phoneFilter.trim().toLowerCase();
     return draft.contacts.filter((c) => {
-      if (!includeSuppressed && suppressedSet.has(c.normalizedPhone)) return false;
+      const np = c.normalizedPhone ?? '';
+      if (!includeSuppressed && np && suppressedSet.has(np)) return false;
       if (namedOnly && !(c.fields['name'] ?? '').trim()) return false;
-      if (q && !`${c.normalizedPhone} ${c.phone} ${(c.fields['name'] ?? '').toLowerCase()}`.includes(q)) return false;
-      if (countryFilter !== 'all' && !c.normalizedPhone.startsWith(`+${countryFilter}`)) return false;
+      if (q && !`${np} ${c.phone} ${(c.fields['name'] ?? '').toLowerCase()}`.toLowerCase().includes(q)) return false;
+      if (countryFilter !== 'all' && !np.startsWith(`+${countryFilter}`)) return false;
       return true;
     });
   }, [draft.contacts, phoneFilter, countryFilter, namedOnly, includeSuppressed, suppressedSet]);
@@ -184,8 +186,8 @@ export function CampaignComposer({ onSaved }: { onSaved?: (campaignId: string) =
   // The campaign is built from the *filtered* selection — filters decide who gets sent to.
   const effectiveContacts = filteredContacts;
 
-  const suppressedInSelection = useMemo(
-    () => draft.contacts.filter((c) => suppressedSet.has(c.normalizedPhone)).length,
+  const suppressedCount = useMemo(
+    () => draft.contacts.filter((c) => c.normalizedPhone && suppressedSet.has(c.normalizedPhone)).length,
     [draft.contacts, suppressedSet],
   );
 
@@ -449,6 +451,58 @@ export function CampaignComposer({ onSaved }: { onSaved?: (campaignId: string) =
             </section>
           )}
 
+          <section className="rc-card" aria-labelledby="filter-heading">
+            <h2 id="filter-heading">Filters &amp; selection</h2>
+            <p className="rc-devices-note">
+              Only recipients that pass these filters will be included in the campaign.
+            </p>
+            <div className="rc-grid-2">
+              <div>
+                <label className="rc-label" htmlFor="flt-search">Search name / number</label>
+                <input
+                  id="flt-search"
+                  className="rc-input"
+                  type="search"
+                  value={phoneFilter}
+                  onChange={(e) => setPhoneFilter(e.target.value)}
+                  placeholder="e.g. Alex or +1415"
+                />
+              </div>
+              <div>
+                <label className="rc-label" htmlFor="flt-country">Country code</label>
+                <select
+                  id="flt-country"
+                  className="rc-select"
+                  value={countryFilter}
+                  onChange={(e) => setCountryFilter(e.target.value)}
+                >
+                  <option value="all">All countries</option>
+                  {countries.map((cc) => (
+                    <option key={cc} value={cc}>+{cc}</option>
+                  ))}
+                </select>
+              </div>
+            </div>
+            <div className="rc-row" style={{ marginTop: 8, gap: 16 }}>
+              <label className="rc-check">
+                <input
+                  type="checkbox"
+                  checked={namedOnly}
+                  onChange={(e) => setNamedOnly(e.target.checked)}
+                />{' '}
+                Only contacts with a name
+              </label>
+              <label className="rc-check">
+                <input
+                  type="checkbox"
+                  checked={includeSuppressed}
+                  onChange={(e) => setIncludeSuppressed(e.target.checked)}
+                />{' '}
+                Include suppressed ({suppressedCount})
+              </label>
+            </div>
+          </section>
+
           <section className="rc-card" aria-labelledby="manual-heading">
             <h2 id="manual-heading">Add manually</h2>
             <div className="rc-grid-2">
@@ -472,15 +526,40 @@ export function CampaignComposer({ onSaved }: { onSaved?: (campaignId: string) =
             </button>
           </section>
 
-          <section className="rc-card">
-            <h2>Current recipient list</h2>
+          <section className="rc-card" aria-labelledby="list-heading">
+            <h2 id="list-heading">Current recipient list</h2>
             <p>
-              <strong>{draft.contacts.length}</strong> valid recipients selected. Suppressed contacts are skipped
-              automatically at send time ({suppressedCount} known now).
+              <strong>{effectiveContacts.length}</strong> of {draft.contacts.length} contacts selected after
+              filters. Suppressed contacts are skipped automatically at send time ({suppressedCount} known now).
             </p>
             {draft.contacts.length === 0 && (
               <div className="rc-empty">No recipients yet — import a file or add one manually.</div>
             )}
+            {draft.contacts.length > 0 && effectiveContacts.length === 0 && (
+              <div className="rc-empty">No contacts match the current filters — widen them to include recipients.</div>
+            )}
+            {effectiveContacts.length > 0 && (
+              <table className="rc-table">
+                <thead>
+                  <tr><th>#</th><th>Name</th><th>Number (E.164)</th></tr>
+                </thead>
+                <tbody>
+                  {effectiveContacts.slice(0, 50).map((c, i) => (
+                    <tr key={c.id}>
+                      <td>{i + 1}</td>
+                      <td>{c.fields['name'] ?? ''}</td>
+                      <td>
+                        {c.normalizedPhone ?? c.phone}
+                        {c.normalizedPhone && suppressedSet.has(c.normalizedPhone) && (
+                          <span className="rc-badge" style={{ marginLeft: 6 }}>suppressed</span>
+                        )}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            )}
+            {effectiveContacts.length > 50 && <p>…and {effectiveContacts.length - 50} more.</p>}
             <div className="rc-row" style={{ marginTop: 8 }}>
               <button className="rc-btn rc-btn-primary" disabled={!canReview && draft.contacts.length === 0} onClick={() => setStep('message')}>
                 Continue to message →

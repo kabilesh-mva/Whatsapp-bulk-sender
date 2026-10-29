@@ -4,9 +4,9 @@
  */
 import { useEffect, useState } from 'react';
 import { createRoot } from 'react-dom/client';
-import type { BridgeEvent, Campaign, QueueSummary, SessionSnapshot } from '../types/domain';
+import type { BridgeEvent, BridgeRequest, Campaign, QueueSummary, SessionSnapshot } from '../types/domain';
 
-async function req<T>(r: Parameters<typeof chrome.runtime.sendMessage>[0]): Promise<T> {
+async function req<T>(r: BridgeRequest): Promise<T> {
   const res = (await chrome.runtime.sendMessage(r)) as
     | { ok: true; payload: T }
     | { ok: false; error: string }
